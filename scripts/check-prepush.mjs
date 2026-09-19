@@ -23,8 +23,8 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, "$1"), "..");
 const NODE_BIN = process.execPath;
 const NORMWIND_BIN = path.join(REPO_ROOT, "bin", "normwind.mjs");
-const REGRESSION_SCRIPT = path.join(REPO_ROOT, "scripts", "test-regression.mjs");
-const COMPARE_SCRIPT = path.join(REPO_ROOT, "scripts", "test-compare.mjs");
+const REGRESSION_SCRIPT = path.join(REPO_ROOT, "scripts", "check-regression.mjs");
+const COMPARE_SCRIPT = path.join(REPO_ROOT, "scripts", "check-compare.mjs");
 const SNAPSHOT_JSON = path.join(REPO_ROOT, "docs", "reference", "canonical-replacements.json");
 const SNAPSHOT_MD = path.join(REPO_ROOT, "docs", "reference", "canonical-replacements.md");
 
@@ -1020,6 +1020,11 @@ addCheck("lockfiles agree on dependency versions", async () => {
     // workflow) installs from; bun.lock is what local development uses. A
     // dependency bumped through one package manager must not leave the other
     // silently pinned to the old version.
+    //
+    // Dependabot only ever updates package.json + package-lock.json, so every
+    // one of its PRs lands here red until someone runs `npm run deps:sync`.
+    // That is the intended workflow, not a bug in this check -- see the
+    // "Updating dependencies" section of the README.
     const pkg = await readJson(path.join(REPO_ROOT, "package.json"));
     const declared = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
     const bunLock = await fs.readFile(path.join(REPO_ROOT, "bun.lock"), "utf8").catch(() => null);
@@ -1035,7 +1040,7 @@ addCheck("lockfiles agree on dependency versions", async () => {
         }
         assert(
             bunLock.includes(`"${name}@${exact}"`),
-            `bun.lock does not pin ${name}@${exact}; run \`bun install\` and commit the result`,
+            `bun.lock does not pin ${name}@${exact}; run \`npm run deps:sync\` and commit bun.lock (and dist/, if it changed)`,
         );
         const entry = npmLock.packages?.[`node_modules/${name}`];
         assert(
@@ -1043,6 +1048,76 @@ addCheck("lockfiles agree on dependency versions", async () => {
             `package-lock.json pins ${name}@${entry?.version ?? "nothing"} but package.json declares ${exact}`,
         );
     }
+});
+
+addCheck("lockfiles agree on the whole resolved tree", async () => {
+    // The check above only covers dependencies DECLARED in package.json. That is
+    // not enough: a security bump usually lands on a transitive package, which no
+    // declared-dependency check can see.
+    //
+    // The case that motivated this: nanoid reached us via
+    // eslint-plugin-tailwindcss -> postcss. `npm audit fix` bumped it to 3.3.18 in
+    // package-lock.json, and bun.lock stayed on the vulnerable 3.3.16 -- silently,
+    // because `bun install` leaves an already-satisfying pin alone and 3.3.16
+    // satisfies postcss's `^3.3.16`. Fixing a vulnerability for `npm ci` while
+    // leaving `bun install` on the vulnerable copy is exactly the drift these two
+    // lockfiles exist to make visible, so compare the FULL resolved set.
+    //
+    // Compared as a set of name@version pairs rather than per-path, because the two
+    // package managers describe nesting differently: npm writes
+    // `node_modules/mlly/node_modules/confbox` where bun writes
+    // `mlly/pkg-types/confbox`. Both currently resolve confbox 0.2.4 at the top
+    // level and 0.1.8 nested, and comparing paths would call that a disagreement
+    // when the installed trees are identical.
+    //
+    // Non-registry versions (git/file/link specifiers) are skipped, matching the
+    // `/^\d/` convention used by the declared-dependency check above.
+    const bunLockRaw = await fs.readFile(path.join(REPO_ROOT, "bun.lock"), "utf8").catch(() => null);
+    if (bunLockRaw === null) {
+        return;
+    }
+    const npmLock = await readJson(path.join(REPO_ROOT, "package-lock.json"));
+
+    const npmPairs = new Set();
+    const NODE_MODULES = "node_modules/";
+    for (const [entryPath, meta] of Object.entries(npmLock.packages ?? {})) {
+        if (!entryPath.startsWith(NODE_MODULES) || meta?.link) {
+            continue;
+        }
+        const version = meta?.version;
+        if (typeof version !== "string" || !/^\d/.test(version)) {
+            continue;
+        }
+        const name = entryPath.slice(entryPath.lastIndexOf(NODE_MODULES) + NODE_MODULES.length);
+        npmPairs.add(`${name}@${version}`);
+    }
+
+    const bunPairs = new Set();
+    const bunEntry = /"[^"]+"\s*:\s*\[\s*"((?:@[^"@/]+\/)?[^"@/]+)@([0-9][^"]*)"/g;
+    for (const match of bunLockRaw.matchAll(bunEntry)) {
+        bunPairs.add(`${match[1]}@${match[2]}`);
+    }
+
+    // A parser that silently matches nothing would make this check pass on every
+    // possible input, which is worse than not having it at all.
+    assert(
+        npmPairs.size > 0 && bunPairs.size > 0,
+        `lockfile parsing produced an empty set (npm: ${npmPairs.size}, bun: ${bunPairs.size}); the parser is broken, not the lockfiles`,
+    );
+
+    const npmOnly = [...npmPairs].filter((pair) => !bunPairs.has(pair)).sort();
+    const bunOnly = [...bunPairs].filter((pair) => !npmPairs.has(pair)).sort();
+    const detail = [
+        npmOnly.length ? `only in package-lock.json: ${npmOnly.join(", ")}` : null,
+        bunOnly.length ? `only in bun.lock: ${bunOnly.join(", ")}` : null,
+    ].filter(Boolean).join("; ");
+    assert(
+        npmOnly.length === 0 && bunOnly.length === 0,
+        `lockfiles resolve different trees (${detail}). For a declared dependency run `
+        + "`npm run deps:sync`; for a transitive one (a security bump, typically) bun needs to be "
+        + "told explicitly, e.g. `bun update <name>`, because `bun install` will not move a pin "
+        + "that still satisfies its range.",
+    );
 });
 
 addCheck("npm pack dry-run", async () => {
@@ -1064,7 +1139,7 @@ addCheck("npm pack dry-run", async () => {
     assert(files.has("docs/reference/canonical-replacements.json"), "pack is missing canonical JSON snapshot");
     assert(files.has("docs/reference/canonical-replacements.md"), "pack is missing canonical MD snapshot");
     assert(files.has("README.md"), "pack is missing README.md");
-    assert(!files.has("scripts/test-regression.mjs"), "pack should not include test scripts");
+    assert(!files.has("scripts/check-regression.mjs"), "pack should not include the check scripts");
     assert(!files.has("test/fixtures/family-shorthand/input.tsx"), "pack should not include test fixtures");
     const stragglers = [...files].filter((f) => /\.(bak|orig|swp|tmp)$/i.test(f));
     assert(stragglers.length === 0, `pack must not contain editor/refactor backups: ${stragglers.join(", ")}`);

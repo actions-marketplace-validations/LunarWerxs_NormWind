@@ -1,6 +1,6 @@
 {
   "name": "@lunawerx/normwind",
-  "version": "3.8.0",
+  "version": "3.8.1",
   "description": "Normalize Tailwinds: Tailwind shorthand audit, canonicalization checks, and safe autofix",
   "type": "module",
   "license": "MIT",
@@ -19,26 +19,29 @@
   "files": [
     "bin/normwind.mjs",
     "lib/*.mjs",
+    "lib/vendor/*.mjs",
     "docs/reference/canonical-replacements.json",
     "docs/reference/canonical-replacements.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "build:action": "node scripts/build-action.mjs",
     "build:action:check": "node scripts/build-action.mjs --check",
     "canonical:extract": "node bin/normwind.mjs --extract-canonical --write-canonical-files",
     "canonical:check": "node bin/normwind.mjs --check-canonical",
-    "test": "node scripts/test-units.mjs && node scripts/test-prepush.mjs && node scripts/test-action.mjs",
+    "deps:sync": "bun install && npm ci && npm run build:action",
+    "test": "node --test && node scripts/check-prepush.mjs && node scripts/check-action.mjs",
     "prepush": "npm test",
-    "test:action": "node scripts/test-action.mjs",
-    "test:regression": "node scripts/test-regression.mjs",
-    "test:regression:update": "node scripts/test-regression.mjs --update",
-    "test:compare": "node scripts/test-compare.mjs",
-    "test:units": "node scripts/test-units.mjs"
+    "test:action": "node scripts/check-action.mjs",
+    "test:regression": "node scripts/check-regression.mjs",
+    "test:regression:update": "node scripts/check-regression.mjs --update",
+    "test:compare": "node scripts/check-compare.mjs",
+    "test:units": "node --test"
   },
   "engines": {
-    "node": ">=20"
+    "node": "^22.18.0 || >=24.11.0"
   },
   "keywords": [
     "tailwind",
@@ -57,8 +60,8 @@
     "class-normalization"
   ],
   "dependencies": {
-    "@babel/parser": "7.29.7",
-    "eslint-plugin-tailwindcss": "3.18.3",
+    "@babel/parser": "8.0.5",
+    "eslint-plugin-tailwindcss": "4.4.0",
     "tailwindcss": "4.3.3"
   },
   "publishConfig": {
@@ -66,6 +69,6 @@
   },
   "devDependencies": {
     "@actions/core": "3.0.1",
-    "@vercel/ncc": "0.44.1"
+    "@vercel/ncc": "0.45.0"
   }
 }

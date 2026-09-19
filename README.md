@@ -12,6 +12,7 @@
 [![node](https://img.shields.io/node/v/@lunawerx/normwind?style=flat-square&label=node&color=04609f&labelColor=0a0e17)](https://nodejs.org)
 [![Tailwind CSS v4](https://img.shields.io/badge/Tailwind_CSS-v4-05b0dc?style=flat-square&logo=tailwindcss&logoColor=white&labelColor=0a0e17)](https://tailwindcss.com)
 [![license MIT](https://img.shields.io/badge/license-MIT-05b0dc?style=flat-square&labelColor=0a0e17)](https://opensource.org/licenses/MIT)
+[![Discord](https://img.shields.io/badge/Discord-join_the_community-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=0a0e17)](https://discord.gg/PsWpeNUzhk)
 
 <strong>Normalize Tailwinds.</strong><br/>
 A zero-config CLI and GitHub Action that finds bloated Tailwind utility classes and rewrites them into their short, canonical form.
@@ -433,7 +434,7 @@ The npm package intentionally publishes only runtime assets, brand assets, and r
 Tests and fixtures live in the source repo but are excluded from the packed tarball.
 
 <details>
-<summary><strong>🧑‍💻 Development &amp; maintainer commands</strong></summary>
+<summary><strong>🧑💻 Development &amp; maintainer commands</strong></summary>
 
 <br/>
 
@@ -453,7 +454,58 @@ npm run test:regression:update   # update fixtures after an intentional change
 npm run test:compare             # live canonicalizer vs bundled snapshot
 npm run canonical:extract        # regenerate canonical replacement files
 npm run canonical:check          # verify canonical replacement files are current
+npm run deps:sync                # after a dependency bump: refresh bun.lock and rebuild dist/
 ```
+
+### Updating dependencies
+
+This repo commits **three** things that a dependency bump has to move together:
+
+| File | Written by | Enforced by |
+| --- | --- | --- |
+| `package.json` + `package-lock.json` | `npm` | `npm ci` in CI and the release workflow |
+| `bun.lock` | `bun` | prepush checks *lockfiles agree on dependency versions* (declared) and *lockfiles agree on the whole resolved tree* (transitive) |
+| `dist/index.mjs` + `dist/normwind.mjs` | `@vercel/ncc`, via `npm run build:action` | prepush check *action: committed bundle is current* |
+
+Dependabot only knows about the first row. It has no way to update the other two, and no Dependabot configuration can fix that: `bun.lock` and `package-lock.json` describe the *same* `package.json`, so adding a second `package-ecosystem` would just open a second, conflicting PR for every bump. **Every Dependabot PR therefore arrives red on purpose, and finishing it is a manual step:**
+
+```bash
+gh pr checkout <number>
+npm run deps:sync
+git add bun.lock dist/            # only if they actually changed
+git commit -m "chore(deps): sync bun.lock and dist/ with the npm bump"
+git push
+```
+
+`deps:sync` needs [Bun](https://bun.sh) on `PATH` for its first step; nothing else in the repo does, and CI never runs it. If you do not have Bun, ask someone who does to push the `bun.lock` half.
+
+Note that `npm test` chains its three suites with `&&`, so a stale `bun.lock` short-circuits before the bundle check ever runs. If you fix only the lockfile, expect the `dist/` failure to appear on the next push. `npm run deps:sync` does both at once for exactly this reason.
+
+#### Security bumps on a *transitive* package need one extra step
+
+`deps:sync` is enough for anything Dependabot touches, because those are dependencies **declared** in `package.json`. It is **not** enough for a transitive one, which is what most advisories are:
+
+```bash
+npm audit fix                     # moves package-lock.json only
+bun update <name>                 # bun.lock needs to be told explicitly
+npm ci && npm run build:action    # then resync the tree and the bundle
+```
+
+The `bun install` inside `deps:sync` will **not** move a pin that still satisfies its range. When nanoid was patched for [GHSA-2v37-7h3g-55p8](https://github.com/advisories/GHSA-2v37-7h3g-55p8), `3.3.16` still satisfied its parent's `^3.3.16`, so `bun install` left the vulnerable copy in place while `npm ci` installed the fixed one. The *lockfiles agree on the whole resolved tree* check exists to catch precisely that.
+
+#### Resolving a `dist/` conflict during a rebase
+
+**Rebuild the bundle. Never take either side.**
+
+```bash
+npm run build:action && git add dist/
+```
+
+`dist/` is generated, so neither side of a conflict is authoritative and a textual merge of two minified bundles is meaningless. Taking one side *looks* like it worked and then ships a stale bundle: the *action: committed bundle is current* check will fail, but only on the commit that carries the stale copy, which may not be the one that looked conflicted. That is precisely how it happened on `3fe92ad`, which went red on all seven CI legs.
+
+You should not have to remember this. `.gitattributes` marks `dist/**` as `-merge`, so git refuses to invent a merge result there: it conflicts, leaves the current branch's copy in place, and writes **no conflict markers**, so there is no half-merged bundle to commit by accident. The full rule lives in `.gitattributes` next to that line, and every staleness error from `build:action` repeats it.
+
+Note that the bundle can change even when the source edit appears to have no effect on it: removing a dead helper still changed the output, because it was the second user of a name and the minifier stopped emitting that name once it had one user left. Do not skip the rebuild because the diff looks irrelevant.
 
 </details>
 
@@ -464,9 +516,26 @@ npm run canonical:check          # verify canonical replacement files are curren
 
 NormWind deliberately uses `eslint-plugin-tailwindcss`'s **static group data** instead of invoking the plugin's `enforces-shorthand` rule directly. Under Tailwind v4, the plugin's config path can return only `separator` and `prefix`, which prevents the rule from resolving many utility families. NormWind keeps the useful upstream group data while using its own Tailwind v4-compatible matcher and Tailwind's own v4 canonicalization engine, so you get the plugin's knowledge without its v4 blind spots.
 
+As of `eslint-plugin-tailwindcss` 4.x, that group table lives in NormWind's own tree (`lib/vendor/tailwind-classname-groups.mjs`, MIT-licensed, full notice in `THIRD-PARTY-NOTICES.md`) rather than being imported from the package at run time: v4 rewrote shorthand classification to query a live Tailwind engine through an internal worker and no longer ships or exports the static table, so this is a one-time snapshot of the last version (3.18.3) that had it. `eslint-plugin-tailwindcss` itself stays a declared dependency, bumped alongside the rest.
+
 </details>
 
 ## 📜 Changelog
+
+<details>
+<summary><strong>v3.8.1</strong>: 2026-09-03 · maintenance release, no change to scanning, fixing, or output</summary>
+
+<br/>
+
+**Nothing in this release changes what NormWind reports or how `--fix` behaves.** It is repository
+housekeeping, published so the packaged README matches the source. If you are on v3.8.0 there is no
+functional reason to upgrade.
+
+- **Dependency bump: `nanoid` 3.3.18** ([GHSA-2v37-7h3g-55p8](https://github.com/advisories/GHSA-2v37-7h3g-55p8)), reached through `eslint-plugin-tailwindcss` → `postcss`. **This is not a fix you were exposed to:** the advisory affects a package resolved on a `^3.3.x` range, so a fresh install of any recent NormWind already picked up the patched version, and the bundled Marketplace Action does not contain `nanoid` at all. The bump pins it in this repository's own lockfiles.
+- **Lockfile drift is now caught on transitive packages, not just declared ones** (development gate). This project keeps both an npm and a Bun lockfile, and the previous check only compared the dependencies named in `package.json`, where most advisories never land. The `nanoid` bump above is the worked example: `npm audit fix` moved one lockfile while the other stayed on the vulnerable version, silently, because the old pin still satisfied its range. The check now compares the full resolved set of both files.
+- **A merge conflict in the committed Action bundle must be resolved by rebuilding it**, never by taking either side. Both are stale by definition, since each was generated from a different source tree than the merged one. `.gitattributes` now marks `dist/**` as unmergeable so Git stops attempting a meaningless three-way merge of two single-line minified files, the build script repeats the rule in its staleness error, and the README documents it. A rebase that resolved this file in favour of the upstream copy is what turned CI red across all seven legs before v3.8.0.
+
+</details>
 
 <details>
 <summary><strong>v3.8.0</strong>: 2026-08-09 · merge-safety correctness fix, SARIF reporter, ignore files, broader scanning</summary>
@@ -658,7 +727,7 @@ Initial public release. Shorthand auditor and autofixer for Tailwind CSS utility
 NormWind sits next to two tools people already reach for when tidying Tailwind class strings, rather than replacing either:
 
 - **[`prettier-plugin-tailwindcss`](https://github.com/tailwindlabs/prettier-plugin-tailwindcss)** (Tailwind Labs' own Prettier plugin) sorts class names into Tailwind's recommended order. By its own documentation it does not merge shorthand combinations or rewrite arbitrary values. NormWind does the opposite job, and the two compose fine in the same project: let Prettier sort, let NormWind shorten.
-- **[`eslint-plugin-tailwindcss`](https://github.com/francoismassart/eslint-plugin-tailwindcss)**'s `enforces-shorthand` rule is an ESLint rule with its own autofix, and NormWind reuses its utility-group data rather than duplicating it (see "A note on Tailwind v4 & eslint-plugin-tailwindcss" above). But the rule runs inside an ESLint config, and under Tailwind v4 its config path can return only `separator` and `prefix`, which keeps it from resolving many utility families. NormWind runs standalone, as a CLI or GitHub Action, with no ESLint setup required, and also canonicalizes arbitrary values via Tailwind's own engine, which shorthand-focused linting doesn't cover.
+- **[`eslint-plugin-tailwindcss`](https://github.com/francoismassart/eslint-plugin-tailwindcss)**'s `enforces-shorthand` rule is an ESLint rule with its own autofix, and NormWind reuses its utility-group data (vendored, see "A note on Tailwind v4 & eslint-plugin-tailwindcss" above) rather than reimplementing it. But the rule runs inside an ESLint config, and under Tailwind v4 its config path can return only `separator` and `prefix`, which keeps it from resolving many utility families. NormWind runs standalone, as a CLI or GitHub Action, with no ESLint setup required, and also canonicalizes arbitrary values via Tailwind's own engine, which shorthand-focused linting doesn't cover.
 
 ## ❓ FAQ
 
@@ -675,7 +744,7 @@ By default, running `normwind` only audits and reports findings; it never writes
 No. NormWind runs entirely against your local files and your project's installed Tailwind engine; it needs no API token or account. The GitHub Action bundles NormWind, Tailwind, and Babel itself, installs nothing on the runner, and strips inherited secrets from its scanner process, so it has no documented path to send code out during a scan.
 
 **What are the system requirements?**
-NormWind requires Node.js 20 or later, per its `package.json` engines field. It works against Tailwind CSS v4 projects: full shorthand and arbitrary-value canonicalization on Tailwind 4.1 through 4.3, and shorthand-only auditing on 4.0, since that release doesn't expose the canonicalization API NormWind depends on for arbitrary values.
+NormWind requires Node.js `^22.18.0` or `>=24.11.0`, per its `package.json` engines field (Node 22.0-22.17 and 24.0-24.10 fall in the gap). Node 20 was dropped on 2026-09-10, after it reached end-of-life on 2026-04-30 and stopped receiving security patches; the floor narrowed further on 2026-09-14 to match `@babel/parser` 8's own declared engines range. It works against Tailwind CSS v4 projects: full shorthand and arbitrary-value canonicalization on Tailwind 4.1 through 4.3, and shorthand-only auditing on 4.0, since that release doesn't expose the canonicalization API NormWind depends on for arbitrary values.
 
 **Does it support Tailwind CSS v3?**
 The repo documents support for Tailwind CSS v4 only, spanning 4.0 through the bundled 4.3.3. Arbitrary-value canonicalization relies on Tailwind's `designSystem.canonicalizeCandidates` engine, a v4 API. No v3 compatibility is documented in the README or changelog, so treat NormWind as a v4-only tool unless a future release states otherwise.
